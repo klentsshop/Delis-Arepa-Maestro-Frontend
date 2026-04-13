@@ -107,7 +107,7 @@ export function CartProvider({ children }) {
       // Buscamos el último producto que NO sea un topping (el "Padre")
       // Nota: Puedes cambiar "AREPAS" por la categoría principal de tu cliente
       const lastPadreIdx = copy.findLastIndex(it => {
-          const c = (it.categoria || "").toUpperCase();
+          const c = (it.categoria || "").trim().toUpperCase();
           return c !== "TOPPINGS" && c !== "ADICIONES" && c !== "TOPPINGS ADICIONALES";
       });
 
