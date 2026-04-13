@@ -1,6 +1,8 @@
-// 1. IMPORTACIÓN CRÍTICA: Cambiamos 'client' por 'sanityClientServer'
+// 1. IMPORTACIÓN CRÍTICA: Usamos el cliente con permisos de escritura (TOKEN)
 import { sanityClientServer as client } from '@/lib/sanity'; 
 import { NextResponse } from 'next/server';
+
+export const dynamic = 'force-dynamic';
 
 export async function POST(request) {
     try {
@@ -12,14 +14,23 @@ export async function POST(request) {
             return NextResponse.json({ error: "Faltan datos (ID o Cantidad)" }, { status: 400 });
         }
 
-        // 3. Forzamos que sea un número para evitar que Sanity lo rechace como texto
+        // 3. Normalización de datos
         const monto = Number(cantidadASumar);
 
-        // 🚀 OPERACIÓN MAESTRA REFORZADA (Usando el cliente con TOKEN)
+        // 🛡️ BISTURÍ: Obtenemos el stock actual directamente de la fuente de verdad (Sanity)
+        // Esto asegura que sumamos sobre el valor real del servidor, no sobre lo que cree el cliente.
+        const actual = await client.fetch(`*[_id == $id][0].stockActual`, { id: insumoId });
+        
+        // Calculamos el nuevo valor final
+        const nuevoValorCalculado = (Number(actual) || 0) + monto;
+
+        // 🚀 OPERACIÓN MAESTRA BLINDADA
+        // Usamos .set() en lugar de .inc() para evitar que peticiones duplicadas
+        // sigan sumando erróneamente.
         const result = await client
             .patch(insumoId)
-            .setIfMissing({ stockActual: 0 }) // Si el campo no existe en Sanity, lo crea en 0
-            .inc({ stockActual: monto })      // Suma la cantidad recibida
+            .setIfMissing({ stockActual: 0 }) 
+            .set({ stockActual: nuevoValorCalculado }) // 👈 CORRECCIÓN: Establece el valor exacto calculado
             .commit();
 
         console.log(`✅ Sanity: ${insumoId} actualizado. Nuevo stock: ${result.stockActual}`);
@@ -30,8 +41,10 @@ export async function POST(request) {
         });
 
     } catch (error) {
-        // Si el error es "Mismatched Token" o "Permission Denied", saldrá aquí:
         console.error("🔥 Error real de Sanity en servidor:", error.message);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return NextResponse.json({ 
+            error: "Error al actualizar el inventario",
+            details: error.message 
+        }, { status: 500 });
     }
 }
