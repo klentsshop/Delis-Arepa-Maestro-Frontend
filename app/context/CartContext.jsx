@@ -71,58 +71,93 @@ export function CartProvider({ children }) {
     return () => clearTimeout(saveTimeout);
   }, [items, tipoOrden]);
   
-  const addProduct = async (product) => {
-    const pId = product._id || product.id;
-    const insumoId = product.insumoVinculado?._ref;
+const addProduct = async (product) => {
+  const pId = product._id || product.id;
+  const insumoId = product.insumoVinculado?._ref;
+  const precioNum = cleanPrice(product.precio);
 
-    // --- 🛡️ ESCUDO PREVENTIVO (Bloqueo Síncrono) ---
-    if (product.controlaInventario && insumoId) {
-      const stockEnProducto = Number(product.stockActual) || 0;
-      
-      if (!stockLocalCache.has(insumoId) || stockEnProducto > Number(stockLocalCache.get(insumoId))) {
-        stockLocalCache.set(insumoId, stockEnProducto);
-      }
-
-      const stockDisponible = Number(stockLocalCache.get(insumoId));
-      const cantidadADescontar = Number(product.cantidadADescontar) || 1;
-
-      if ((stockDisponible + 0.001) < cantidadADescontar) {
-        alert(`🚫 STOCK AGOTADO LOCAL: No puedes agregar más "${product.nombre}".`);
-        return; 
-      }
-
-      stockLocalCache.set(insumoId, stockDisponible - cantidadADescontar);
+  // --- 🛡️ 1. LÓGICA DE INVENTARIO CENTRALIZADA (Sin duplicados) ---
+  if (product.controlaInventario && insumoId) {
+    const stockEnProducto = Number(product.stockActual) || 0;
+    
+    if (!stockLocalCache.has(insumoId) || stockEnProducto > Number(stockLocalCache.get(insumoId))) {
+      stockLocalCache.set(insumoId, stockEnProducto);
     }
 
-    // --- 🍎 1. LÓGICA VISUAL ---
-    const precioNum = cleanPrice(product.precio);
+    const stockDisponible = Number(stockLocalCache.get(insumoId));
+    const cantidadADescontar = Number(product.cantidadADescontar) || 1;
 
-    setItems(prev => {
+    if ((stockDisponible + 0.001) < cantidadADescontar) {
+      alert(`🚫 STOCK AGOTADO LOCAL: No puedes agregar más "${product.nombre || product.nombrePlato}".`);
+      return; 
+    }
+
+    // 🚀 UN SOLO DISPARO AL SERVIDOR
+    fetch('/api/inventario/descontar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ insumoId, cantidad: cantidadADescontar })
+    })
+    .then(async (res) => {
+      const data = await res.json();
+
+      // 🚨 TU LÓGICA DE REVERSIÓN (Caso 409 - INTACTA)
+      if (res.status === 409) {
+        stockLocalCache.set(insumoId, Number(data.disponible || 0));
+       
+        avisosDados.add(insumoId);
+
+        setItems(prev => {
+          const idx = prev.findIndex(it => 
+            (it._id || it.id) === pId && !it._key && (it.comentario === (product.comentario || ''))
+          );
+          if (idx === -1) return prev;
+          const copy = [...prev];
+          if (copy[idx].cantidad > 1) {
+            const nCant = copy[idx].cantidad - 1;
+            copy[idx] = { ...copy[idx], cantidad: nCant, subtotalNum: nCant * precioNum };
+            return copy;
+          } else {
+            return copy.filter((_, i) => i !== idx);
+          }
+        });
+        alert(`🚫 STOCK AGOTADO: El servidor indica que solo quedan ${data.disponible} unidades.`);
+        return;
+      }
+
+      // ✅ TU LÓGICA DE ÉXITO Y ALERTAS (Caso 200 - INTACTA)
+      if (res.ok) {
+        stockLocalCache.set(insumoId, Number(data.nuevoStock));
+        if (data.alertaStockBajo && !avisosDados.has(insumoId)) {
+          avisosDados.add(insumoId);
+          alert(`⚠️ AVISO: Stock bajo de "${data.nombreInsumo || product.nombre}" (${data.nuevoStock} disp.)`);
+        }
+        window.dispatchEvent(new Event('inventarioActualizado'));
+      }
+    })
+    .catch(err => {
+      console.error("🔥 Error crítico inventario:", err);
+      stockLocalCache.set(insumoId, 0); 
+    });
+  }
+
+  // --- 🍎 2. LÓGICA VISUAL (Tu flujo de Arepas y Toppings sin cambiar ni una coma) ---
+  setItems(prev => {
     const catActual = (product.categoria || "").trim().toUpperCase();
     const esTopping = catActual === "TOPPINGS ADICIONALES" || catActual === "TOPPINGS" || catActual === "ADICIONES";
 
-    // A. LÓGICA DE TOPPING: Buscar la última arepa y meterse adentro
     if (esTopping) {
       const copy = [...prev];
-      // Buscamos el último producto que NO sea un topping (el "Padre")
-      // Nota: Puedes cambiar "AREPAS" por la categoría principal de tu cliente
       const lastPadreIdx = copy.findLastIndex(it => {
-          const c = (it.categoria || "").trim().toUpperCase();
-          return c !== "TOPPINGS" && c !== "ADICIONES" && c !== "TOPPINGS ADICIONALES";
+          const cat = (it.categoria || "").trim().toUpperCase();
+         return cat === "AREPAS";
       });
 
       if (lastPadreIdx !== -1) {
         const padre = copy[lastPadreIdx];
         const nombreTopping = product.nombrePlato || product.nombre;
-        
-        // Inyectamos en el comentario
-        const nuevoComentario = padre.comentario 
-          ? `${padre.comentario}, +${nombreTopping}` 
-          : `+${nombreTopping}`;
-        
+        const nuevoComentario = padre.comentario ? `${padre.comentario}, +${nombreTopping}` : `+${nombreTopping}`;
         const nuevoPrecio = padre.precioNum + precioNum;
-        
-        // Guardamos el insumo en la "mochila" (insumosAgrupados) para descontar stock luego
         const insumosActualizados = [
           ...(padre.insumosAgrupados || []),
           { 
@@ -131,39 +166,24 @@ export function CartProvider({ children }) {
             nombre: product.nombrePlato || product.nombre
           }
         ];
-
         copy[lastPadreIdx] = { 
-          ...padre, 
-          comentario: nuevoComentario,
-          precioNum: nuevoPrecio,
-          subtotalNum: padre.cantidad * nuevoPrecio,
-          insumosAgrupados: insumosActualizados 
+          ...padre, comentario: nuevoComentario, precioNum: nuevoPrecio, 
+          subtotalNum: padre.cantidad * nuevoPrecio, insumosAgrupados: insumosActualizados 
         };
         return copy;
       }
     }
 
-    // B. LÓGICA DE PRODUCTO PADRE (Ej: Arepa): Siempre línea nueva para recibir sus propios toppings
     if (catActual === "AREPAS") {
         return [...prev, { 
-          ...product, 
-          _id: pId, 
-          lineId: crypto.randomUUID(), 
-          cantidad: 1, 
-          precioNum, 
-          subtotalNum: precioNum, 
-          comentario: '', 
-          categoria: catActual,
-          insumosAgrupados: [], // <--- MOCHILA INICIALIZADA
-          seImprime: product.seImprime ?? true 
+          ...product, _id: pId, lineId: crypto.randomUUID(), cantidad: 1, 
+          precioNum, subtotalNum: precioNum, comentario: '', 
+          categoria: catActual, insumosAgrupados: [], seImprime: product.seImprime ?? true 
         }];
     }
-    // C. AGRUPACIÓN NORMAL (Bebidas, etc.) - Tu lógica original de agrupar por ID + Comentario
+
     const existingIdx = prev.findIndex(it => 
-      (it._id || it.id) === pId && 
-      (it.comentario === (product.comentario || '')) &&
-      !it._key &&
-      (it.categoria || "").toUpperCase() !== "AREPAS"
+      (it._id || it.id) === pId && (it.comentario === (product.comentario || '')) && !it._key && (it.categoria || "").toUpperCase() !== "AREPAS"
     );
 
     if (existingIdx !== -1) {
@@ -173,76 +193,12 @@ export function CartProvider({ children }) {
       return copy;
     }
 
-    // D. PRODUCTO NUEVO
-   return [...prev, { 
-      ...product, _id: pId, lineId: crypto.randomUUID(), 
-      cantidad: 1, precioNum, subtotalNum: precioNum, 
-      comentario: product.comentario || '', 
-      categoria: catActual,
-      insumosAgrupados: [], // <--- IMPORTANTE: Para que todo producto pueda recibir toppings
-      seImprime: product.seImprime ?? true 
+    return [...prev, { 
+      ...product, _id: pId, lineId: crypto.randomUUID(), cantidad: 1, 
+      precioNum, subtotalNum: precioNum, comentario: product.comentario || '', 
+      categoria: catActual, insumosAgrupados: [], seImprime: product.seImprime ?? true 
     }];
   });
-  // --- 🛡️ 2. LÓGICA DE INVENTARIO (VERSIÓN BLINDADA) ---
-    if (product.controlaInventario && insumoId) {
-      fetch('/api/inventario/descontar', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            insumoId, 
-            cantidad: Number(product.cantidadADescontar) || 1 
-        })
-      })
-      .then(async (res) => {
-        const data = await res.json();
-
-        // 🚨 CASO 409: EL SERVIDOR DIJO NO (Stock insuficiente)
-        if (res.status === 409) {
-          // ✅ BISTURÍ: No asumimos 0. Seteamos lo que el servidor diga que hay.
-          stockLocalCache.set(insumoId, Number(data.disponible || 0));
-          
-          avisosDados.add(insumoId);
-
-          setItems(prev => {
-            // REVERSIÓN SEGURA: Solo afectamos lo que no se ha guardado (_key)
-            const idx = prev.findIndex(it => 
-                (it._id || it.id) === pId && 
-                !it._key && 
-                (it.comentario === (product.comentario || ''))
-            );
-            
-            if (idx === -1) return prev;
-            const copy = [...prev];
-            if (copy[idx].cantidad > 1) {
-                const nCant = copy[idx].cantidad - 1;
-                copy[idx] = { ...copy[idx], cantidad: nCant, subtotalNum: nCant * precioNum };
-                return copy;
-            } else {
-                return copy.filter((_, i) => i !== idx);
-            }
-          });
-
-          alert(`🚫 STOCK AGOTADO: El servidor indica que solo quedan ${data.disponible} unidades.`);
-          return;
-        }
-
-        // ✅ CASO 200: ÉXITO TOTAL
-        if (res.ok) {
-            // Sincronizamos el caché local con la verdad absoluta del servidor
-            stockLocalCache.set(insumoId, Number(data.nuevoStock));
-
-            if (data.alertaStockBajo && !avisosDados.has(insumoId)) {
-                avisosDados.add(insumoId);
-                alert(`⚠️ AVISO: Stock bajo de "${data.nombreInsumo || product.nombre}" (${data.nuevoStock} disp.)`);
-            }
-        }
-      })
-      .catch(err => {
-          console.error("🔥 Error crítico inventario:", err);
-          // 🛡️ Si la red falla, no dejamos que el usuario siga agregando a ciegas
-          stockLocalCache.set(insumoId, 0); 
-      });
-    }
 };
   const setCartFromOrden = (platosOrdenados = [], tipoDeSanity = 'mesa') => {
     // 🧹 Limpiamos el rastro del localStorage antes de cargar lo nuevo

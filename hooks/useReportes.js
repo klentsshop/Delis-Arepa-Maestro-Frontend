@@ -106,24 +106,26 @@ export function useReportes(getFechaBogota) {
                     else metodos.digital += venta;
                 }
 
-                v.platosVendidosV2?.forEach(p => {
-                    const nombrePlato = p.nombrePlato || "Desconocido";
-                    const cantPlato = Number(p.cantidad || 0);
-                    const valorPlato = Number(p.precioUnitario || 0);
-                    
-                    productos[nombrePlato] = (productos[nombrePlato] || 0) + cantPlato;
-                    // ✅ CORRECCIÓN: Usamos nombrePlato en ambas líneas
-                    preciosParaExcel[nombrePlato] = valorPlato;
+                // ✅ CORRECCIÓN SENIOR PARA REPORTES REALES
+v.platosVendidosV2?.forEach(p => {
+    const nombrePlato = p.nombrePlato || "Desconocido";
+    const cantPlato = Number(p.cantidad || 0);
+    const valorPlato = Number(p.precioUnitario || 0);
+    
+    productos[nombrePlato] = (productos[nombrePlato] || 0) + cantPlato;
+    preciosParaExcel[nombrePlato] = valorPlato;
 
-                    if (p.insumosAgrupados && p.insumosAgrupados.length > 0) {
-                        p.insumosAgrupados.forEach(extra => {
-                            const nombreTopping = (extra.nombre || "Adición").toUpperCase().trim();
-                            const unidadVenta = 1;
-                            const totalUnidadesEnEstaLinea = unidadVenta * cantPlato;
-                            toppings[nombreTopping] = (toppings[nombreTopping] || 0) + totalUnidadesEnEstaLinea;
-                        });
-                    }
-                });
+    if (p.insumosAgrupados && p.insumosAgrupados.length > 0) {
+        p.insumosAgrupados.forEach(extra => {
+            const nombreTopping = (extra.nombre || "Adición").toUpperCase().trim();
+            const valorBaseMochila = Number(extra.cantidadADevolver) || 0;
+            const totalBaseVendido = valorBaseMochila * cantPlato;
+            const totalEnUnidades = totalBaseVendido / 40;
+            
+            toppings[nombreTopping] = (toppings[nombreTopping] || 0) + totalEnUnidades;
+        });
+    }
+});
             });
 
             // 3. Tu lógica de gastos se mantiene igual después del loop de ventas
